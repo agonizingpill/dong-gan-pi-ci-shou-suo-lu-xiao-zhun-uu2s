@@ -5,12 +5,15 @@ export const states = {
   collecting: '采集中', reference: '标定参考', calibrating: '试算中', review: '待复核', released: '已放行',
   draft: '待冻结', frozen: '已冻结', queued: '已排队', running: '计算中', failed: '计算失败',
   awaiting_verification: '待复测确认', retest_required: '超窗待复测', verified: '待签发', held: '留置',
+  open: '盲测进行中', awaiting_third: '待第三份', finalized: '已定案',
 };
 export const events = {
   'batch.register': '登记批次', 'curve.import': '采集曲线', 'curve.freeze': '冻结曲线', 'sample.record': '登记测量',
   'fit.queue': '提交试算', 'fit.retry': '重试试算', 'fit.failed': '计算失败', 'fit.completed': '试算完成',
   'retest.opened': '创建超窗复测单', 'retest.verified': '复测确认', 'retest.held': '复测留置',
   'release.sign': '主管签发', 'reference.archive': '认证参考批次',
+  'reference.trial': '发起盲测', 'reference.submit': '盲测交卷', 'reference.submit.retry': '交卷重试',
+  'reference.awaiting_third': '转第三人盲测', 'reference.finalize': '盲测定案',
 };
 
 export function h(value = '') {

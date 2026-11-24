@@ -7,7 +7,9 @@ from . import ledger
 from .auth import identity, issue, require, valid_password
 from .db import session
 from .models import CalibrationRelease, ChamberRun, DryBatch, LabEvent, RecipeLot, Role, User
-from .schemas import BatchIn, CurveIn, DecisionIn, Login, RecipeIn, RetestIn, SampleIn
+from .schemas import (
+    BatchIn, CurveIn, DecisionIn, Login, RecipeIn, ReferenceSubmitIn, ReferenceTrialIn, RetestIn, SampleIn,
+)
 
 router = APIRouter()
 operator = require(Role.OPERATOR)
@@ -91,8 +93,8 @@ def create_batch(payload: BatchIn, db: Session = Depends(session), user=Depends(
     return ledger.row(batch)
 
 
-@router.get('/batches/{code}', dependencies=[Depends(identity)])
-def batch_detail(code: str, db: Session = Depends(session)):
+@router.get('/batches/{code}')
+def batch_detail(code: str, db: Session = Depends(session), user=Depends(identity)):
     batch = db.get(DryBatch, code)
     if batch is None:
         raise HTTPException(404, '没有找到该冻干批次')
@@ -100,14 +102,17 @@ def batch_detail(code: str, db: Session = Depends(session)):
     active = runs[0] if runs else None
     samples = ledger.samples_for(db, active.id) if active else []
     entry = ledger.release_for(db, active.id) if active else None
+    trial = ledger.reference_trial_for(db, code)
     readiness = None
-    try:
-        ledger.paired_measurements(db, ledger.training_run(db, batch))
-    except ValueError as exc:
-        readiness = str(exc)
+    if trial is None:
+        try:
+            ledger.paired_measurements(db, ledger.training_run(db, batch))
+        except ValueError as exc:
+            readiness = str(exc)
     return {'batch': ledger.row(batch), 'recipe': ledger.row(db.get(RecipeLot, batch.recipe_code)),
             'runs': [ledger.row(run) for run in runs], 'samples': [ledger.row(sample) for sample in samples],
-            'calibration': ledger.row(entry) if entry else None, 'readiness_issue': readiness}
+            'calibration': ledger.row(entry) if entry else None, 'readiness_issue': readiness,
+            'reference_trial': ledger.trial_view(db, trial, user) if trial else None}
 
 
 @router.post('/batches/{code}/curves', status_code=201)
@@ -169,6 +174,43 @@ def detail(entry_id: int, db: Session = Depends(session)):
     return {'batch': ledger.row(batch), 'curve': ledger.row(run), 'entry': ledger.row(entry),
             'retest': [ledger.row(sample) for sample in ledger.samples_for(db, run.id, retest=True)],
             'events': [ledger.row(event) for event in events]}
+
+
+@router.post('/batches/{code}/reference-trial', status_code=201)
+def open_reference_trial(code: str, payload: ReferenceTrialIn, db: Session = Depends(session),
+                         user=Depends(supervisor)):
+    batch = ledger.locked_batch(db, code)
+    trial = ledger.open_reference_trial(db, batch, payload.model_dump(), user.username)
+    db.commit()
+    return ledger.trial_view(db, trial, user)
+
+
+@router.get('/batches/{code}/reference-trial')
+def reference_trial(code: str, db: Session = Depends(session), user=Depends(identity)):
+    batch = db.get(DryBatch, code)
+    if batch is None:
+        raise HTTPException(404, '没有找到该冻干批次')
+    trial = ledger.reference_trial_for(db, code)
+    if trial is None:
+        raise HTTPException(404, '该批次尚未发起参考盲测')
+    return ledger.trial_view(db, trial, user)
+
+
+@router.post('/batches/{code}/reference-trial/submissions', status_code=201)
+def submit_reference_reading(code: str, payload: ReferenceSubmitIn, db: Session = Depends(session),
+                             user=Depends(operator)):
+    batch = ledger.locked_batch(db, code)
+    trial = ledger.reference_trial_for(db, code, lock=True)
+    if trial is None:
+        raise HTTPException(404, '该批次尚未发起参考盲测')
+    submission, duplicate = ledger.submit_reference(db, batch, trial, payload.model_dump(), user.username)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, '另一份交卷刚刚完成，请刷新后查看交卷进度') from exc
+    return {'duplicate': duplicate, 'slot': submission.slot, 'mean_pct': submission.mean_pct,
+            'trial': ledger.trial_view(db, trial, user)}
 
 
 @router.post('/calibrations/{entry_id}/retry', status_code=202)

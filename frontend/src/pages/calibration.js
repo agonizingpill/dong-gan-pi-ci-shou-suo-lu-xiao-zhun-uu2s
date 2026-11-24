@@ -16,8 +16,11 @@ export function labPage() {
       <div><dt>首测记录</dt><dd>${detail.samples.length} 条阶段测量</dd></div>
       <div><dt>收缩率工艺窗</dt><dd class="mono">${windowLabel([recipe.window_low, recipe.window_high])}</dd></div></dl>
       ${detail.readiness_issue ? `<p class="callout warning">${h(detail.readiness_issue)} <a href="#batches/${h(detail.batch.code)}">处理采集记录 →</a></p>` : ''}
-      ${entry ? `<a class="primary button-link" href="#release/${entry.id}">查看校准单</a>` : staff && detail.batch.state === 'collecting' ?
-        `<button data-action="fit" class="primary" ${detail.readiness_issue ? 'disabled' : ''}>提交冻结曲线试算</button>` : `<p class="empty">${detail.batch.state === 'reference' ? '该批次已认证为历史参考。' : '当前账户仅可查看采集与试算记录。'}</p>`}
+      ${entry ? `<a class="primary button-link" href="#release/${entry.id}">查看校准单</a>` : staff && detail.batch.state === 'collecting' && !detail.reference_trial ?
+        `<button data-action="fit" class="primary" ${detail.readiness_issue ? 'disabled' : ''}>提交冻结曲线试算</button>` :
+        detail.reference_trial && detail.reference_trial.certified_pct == null ?
+        `<p class="callout warning">该批次正作为参考候选盲测，定案并由主管认证后才进入训练。 <a href="#batches/${h(detail.batch.code)}">查看盲测进度 →</a></p>` :
+        `<p class="empty">${detail.batch.state === 'reference' ? '该批次已认证为历史参考。' : '当前账户仅可查看采集与试算记录。'}</p>`}
       ` : '<p class="empty">先在批次与曲线登记物料。</p>'}</div></section>
       <section class="sheet fitting"><div>${sectionTitle('参考与拟合')}
       <div class="padded"><strong class="algorithm">Yeo–Johnson<br><span>+ Ridge</span></strong>
@@ -79,7 +82,7 @@ export function releasePage() {
       <section class="sheet evidence">${sectionTitle('拟合证据', `${entry.snapshot.training.length} 个参考批次`)}<div class="padded">
       <dl class="evidence-grid"><div><dt>模型</dt><dd>Yeo–Johnson / Ridge</dd></div><div><dt>逐批留一 RMSE</dt><dd class="mono">${number(entry.result?.loo_rmse, 3)} pp</dd></div>
       <div><dt>Ridge α / 求解器</dt><dd class="mono">${number(entry.result?.alpha, 2)} / ${h(entry.result?.solver || '—')}</dd></div><div><dt>复现种子</dt><dd class="mono">${h(entry.result?.seed || '—')}</dd></div></dl>
-      <details class="entry-form evidence-details"><summary>参考批次与快照指纹</summary><ul>${entry.snapshot.training.map(reference => `<li><span class="mono">${h(reference.batch)}</span> <span>${number(reference.observed)}%</span></li>`).join('')}</ul>
+      <details class="entry-form evidence-details"><summary>参考批次与快照指纹</summary><ul>${entry.snapshot.training.map(reference => `<li><span class="mono">${h(reference.batch)}</span> <span>${number(reference.observed)}%</span>${reference.basis ? ` <small>${h(reference.basis)}</small>` : ''}</li>`).join('')}</ul>
       <p class="hash mono">${h(entry.input_hash)}</p></details></div></section>
     </div><div>${workflow(data)}<section class="sheet history">${sectionTitle('批次审计记录')}
       <ol>${data.events.map(event => `<li><b>${h(events[event.action] || (event.action.endsWith('.blocked') ? '操作拒绝' : event.action))}</b><time>${when(event.happened_at)}</time>

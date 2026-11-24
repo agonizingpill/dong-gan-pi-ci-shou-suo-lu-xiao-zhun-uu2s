@@ -47,6 +47,17 @@ class ReleaseState(StrEnum):
     RELEASED = 'released'
 
 
+class ReferenceRule(StrEnum):
+    AVERAGE = 'average'
+    MEDIAN = 'median'
+
+
+class ReferenceTrialState(StrEnum):
+    OPEN = 'open'
+    AWAITING_THIRD = 'awaiting_third'
+    FINALIZED = 'finalized'
+
+
 def enum(values):
     return Enum(values, values_callable=lambda variants: [item.value for item in variants])
 
@@ -124,6 +135,58 @@ class CalibrationRelease(Base):
     signed_at = mapped_column(DateTime(), nullable=True)
     touched_at = mapped_column(DateTime(), default=utcnow)
     attempts: Mapped[int] = mapped_column(default=0)
+
+
+class ReferenceTrial(Base):
+    """Blind paired measurement of one candidate reference batch by metrologists."""
+
+    __tablename__ = 'reference_trials'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_code: Mapped[str] = mapped_column(ForeignKey('dry_batches.code'), unique=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey('chamber_runs.id'))
+    specimens: Mapped[list] = mapped_column(JSON)
+    state: Mapped[ReferenceTrialState] = mapped_column(enum(ReferenceTrialState), default=ReferenceTrialState.OPEN)
+    rule: Mapped[ReferenceRule | None] = mapped_column(enum(ReferenceRule), nullable=True)
+    final_pct: Mapped[float | None] = mapped_column(Double)
+    spread_pp: Mapped[float | None] = mapped_column(Double)
+    initial_spread_pp: Mapped[float | None] = mapped_column(Double, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(32))
+    created_at = mapped_column(DateTime(), default=utcnow)
+    finalized_at = mapped_column(DateTime(), nullable=True)
+    certified_pct: Mapped[float | None] = mapped_column(Double, nullable=True)
+    certified_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    certified_at = mapped_column(DateTime(), nullable=True)
+    certification_note: Mapped[str | None] = mapped_column(String(240), nullable=True)
+
+
+class ReferenceSubmission(Base):
+    """One metrologist's frozen reading set; the first accepted set per person is retained."""
+
+    __tablename__ = 'reference_submissions'
+    __table_args__ = (
+        UniqueConstraint('trial_id', 'metrologist'),
+        UniqueConstraint('trial_id', 'slot'),
+        CheckConstraint('slot BETWEEN 1 AND 3'),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    trial_id: Mapped[int] = mapped_column(ForeignKey('reference_trials.id'), index=True)
+    slot: Mapped[int] = mapped_column()
+    metrologist: Mapped[str] = mapped_column(String(32))
+    mean_pct: Mapped[float] = mapped_column(Double)
+    submitted_at = mapped_column(DateTime(), default=utcnow)
+
+
+class ReferenceReading(Base):
+    __tablename__ = 'reference_readings'
+    __table_args__ = (
+        UniqueConstraint('submission_id', 'specimen', 'stage'),
+        CheckConstraint('thickness_mm > 0'),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    submission_id: Mapped[int] = mapped_column(ForeignKey('reference_submissions.id'), index=True)
+    specimen: Mapped[str] = mapped_column(String(32))
+    stage: Mapped[Stage] = mapped_column(enum(Stage))
+    thickness_mm: Mapped[float] = mapped_column(Double)
 
 
 class LabEvent(Base):

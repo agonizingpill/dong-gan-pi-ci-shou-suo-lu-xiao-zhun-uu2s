@@ -114,7 +114,24 @@ const commands = {
   archive: async data => {
     await api.archive(store.batch.batch.code, data);
     await draw();
-    toast('批次已认证为标定参考');
+    toast('已凭盲测定案值认证参考批次');
+  },
+  openReferenceTrial: async data => {
+    await api.openTrial(store.batch.batch.code, {
+      specimens: String(data.specimens).split(/[,，\s]+/).filter(Boolean), note: data.note,
+    });
+    await draw();
+    toast('参考盲测已发起，等候两名计量员交卷');
+  },
+  submitReference: async (data, form) => {
+    const specimens = form.dataset.specimens.split(',');
+    const result = await api.submitTrial(store.batch.batch.code, {
+      readings: specimens.map(specimen => ({
+        specimen, before_mm: Number(data[`before:${specimen}`]), after_mm: Number(data[`after:${specimen}`]),
+      })),
+    });
+    await draw();
+    toast(result.duplicate ? '本组已有你的交卷，原读数保留' : `已交卷（第 ${result.slot} 份）`);
   },
   fit: async () => {
     const entry = await api.fit(store.batch.batch.code);
@@ -138,10 +155,10 @@ const commands = {
   },
 };
 
-async function execute(action, payload, button) {
+async function execute(action, payload, button, form) {
   if (button) button.disabled = true;
   try {
-    await commands[action](payload);
+    await commands[action](payload, form);
   } catch (error) {
     if (error.status === 401 && action !== 'login') logout();
     toast(error.message, true);
@@ -153,7 +170,7 @@ async function execute(action, payload, button) {
 root.addEventListener('submit', event => {
   event.preventDefault();
   const form = event.target;
-  execute(form.dataset.action, Object.fromEntries(new FormData(form)), event.submitter);
+  execute(form.dataset.action, Object.fromEntries(new FormData(form)), event.submitter, form);
 });
 root.addEventListener('click', event => {
   const button = event.target.closest('button');

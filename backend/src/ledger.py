@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import statistics
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
@@ -10,15 +11,21 @@ from sqlalchemy import inspect, select
 from .db import QUEUE, redis, utcnow
 from .models import (
     BatchState, CalibrationRelease, ChamberRun, DryBatch, LabEvent, Phase, RecipeLot,
-    ReleaseState, RunState, ShrinkageSample, Stage,
+    ReferenceRule, ReferenceReading, ReferenceSubmission, ReferenceTrial, ReferenceTrialState,
+    ReleaseState, Role, RunState, ShrinkageSample, Stage,
 )
 
 log = logging.getLogger(__name__)
+REFERENCE_SPREAD_LIMIT = 1.0
 
 
 def checksum(data):
     normalized = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
     return hashlib.sha256(normalized.encode()).hexdigest()
+
+
+def iso(value):
+    return value.replace(tzinfo=timezone.utc).isoformat() if isinstance(value, datetime) else value
 
 
 def record(db, actor, action, detail, code=None):
@@ -107,6 +114,9 @@ def add_curve(db, batch, payload, actor):
             blocked(db, actor, 'curve.import', '当前校准尚未结案，复测留置后才能导入新周期', batch.code)
     if batch.state in (BatchState.RELEASED, BatchState.REFERENCE):
         blocked(db, actor, 'curve.import', '已放行或归档的批次保留原曲线', batch.code)
+    trial = reference_trial_for(db, batch.code)
+    if trial is not None and trial.certified_pct is None:
+        blocked(db, actor, 'curve.import', '参考盲测尚未定案认证，不能更换设备曲线', batch.code)
     if db.scalar(select(ChamberRun.id).filter_by(batch_code=batch.code, source_name=payload['source_name'])):
         blocked(db, actor, 'curve.import', '同名曲线已存在，请用新文件名保留修订历史', batch.code)
     run = ChamberRun(batch_code=batch.code, **payload)
@@ -132,6 +142,8 @@ def freeze_curve(db, batch, run, actor):
 def add_sample(db, batch, run, payload, actor):
     if batch.state != BatchState.COLLECTING or latest_run(db, batch.code).id != run.id or run.state != RunState.FROZEN:
         blocked(db, actor, 'sample.record', '仅采集中当前冻结曲线接受常规阶段测量', batch.code)
+    if reference_trial_for(db, batch.code) is not None:
+        blocked(db, actor, 'sample.record', '参考盲测进行中，常规试片读数暂停录入', batch.code)
     matches = {item.stage: item.thickness_mm for item in samples_for(db, run.id) if item.specimen == payload['specimen']}
     if payload['stage'] in matches:
         blocked(db, actor, 'sample.record', '同一曲线、试片和阶段已有测量', batch.code)
@@ -148,12 +160,171 @@ def add_sample(db, batch, run, payload, actor):
 def archive_reference(db, batch, actor, note):
     if batch.state != BatchState.COLLECTING:
         blocked(db, actor, 'reference.archive', '只有采集状态可以认证为历史标定批次', batch.code)
-    try:
-        pairs = paired_measurements(db, training_run(db, batch))
-    except ValueError as exc:
-        blocked(db, actor, 'reference.archive', str(exc), batch.code)
+    trial = reference_trial_for(db, batch.code)
+    if trial is None:
+        blocked(db, actor, 'reference.archive', '新参考批须先由两名计量员盲测并完成定案', batch.code)
+    if trial.state != ReferenceTrialState.FINALIZED or trial.final_pct is None:
+        blocked(db, actor, 'reference.archive', '盲测尚未定案，不能认证参考批次', batch.code)
+    if trial.certified_pct is not None:
+        blocked(db, actor, 'reference.archive', '该盲测定案已经认证，无需重复签发', batch.code)
+    run = latest_run(db, batch.code)
+    if run is None or run.id != trial.run_id or run.state != RunState.FROZEN:
+        blocked(db, actor, 'reference.archive', '认证须引用盲测定案所依据的冻结曲线', batch.code)
+    trial.certified_pct = trial.final_pct
+    trial.certified_by = actor
+    trial.certified_at = utcnow()
+    trial.certification_note = note
     batch.state = BatchState.REFERENCE
-    record(db, actor, 'reference.archive', f'{len(pairs)} 组配对 · {note}', batch.code)
+    record(db, actor, 'reference.archive',
+           f'{len(trial.specimens)} 枚试片 · {trial.rule.value} {trial.final_pct:.6f}% · {note}', batch.code)
+
+
+def reference_trial_for(db, code, lock=False):
+    query = select(ReferenceTrial).filter_by(batch_code=code)
+    if lock:
+        query = query.with_for_update()
+    return db.scalar(query)
+
+
+def open_reference_trial(db, batch, payload, actor):
+    if batch.state != BatchState.COLLECTING:
+        blocked(db, actor, 'reference.trial', '只有采集中的批次可以发起参考盲测', batch.code)
+    run = latest_run(db, batch.code)
+    if run is None or run.state != RunState.FROZEN:
+        blocked(db, actor, 'reference.trial', '参考盲测须绑定已冻结的设备曲线', batch.code)
+    issue = curve_issue(run.points)
+    if issue:
+        blocked(db, actor, 'reference.trial', issue, batch.code)
+    if reference_trial_for(db, batch.code) is not None:
+        blocked(db, actor, 'reference.trial', '该批次已有参考盲测任务，请继续原任务', batch.code)
+    specimens = list(dict.fromkeys(payload['specimens']))
+    measured = {sample.specimen for sample in samples_for(db, run.id)}
+    if measured & set(specimens):
+        blocked(db, actor, 'reference.trial', '盲测试片已有非盲读数，请选择未公开的独立试片', batch.code)
+    trial = ReferenceTrial(batch_code=batch.code, run_id=run.id, specimens=specimens, created_by=actor)
+    db.add(trial)
+    record(db, actor, 'reference.trial', f'{len(specimens)} 枚试片 · {payload["note"]}', batch.code)
+    db.flush()
+    return trial
+
+
+def submission_mean(readings):
+    return round(statistics.fmean(100 * (1 - item['after_mm'] / item['before_mm']) for item in readings), 6)
+
+
+def trial_submissions(db, trial):
+    return db.scalars(select(ReferenceSubmission).filter_by(trial_id=trial.id)
+                      .order_by(ReferenceSubmission.slot)).all()
+
+
+def finalize_trial(db, trial, means, actor):
+    if trial.state == ReferenceTrialState.AWAITING_THIRD:
+        rule, value = ReferenceRule.MEDIAN, round(statistics.median(means), 6)
+    else:
+        rule, value = ReferenceRule.AVERAGE, round(statistics.fmean(means), 6)
+    trial.rule = rule
+    trial.final_pct = value
+    trial.spread_pp = round(max(means) - min(means), 6)
+    trial.state = ReferenceTrialState.FINALIZED
+    trial.finalized_at = utcnow()
+    basis = '三份中位数' if rule == ReferenceRule.MEDIAN else '两份平均值'
+    record(db, actor, 'reference.finalize',
+           f'{basis} {value:.6f}% · 极差 {trial.spread_pp:.6f} pp · {len(means)} 份盲测', trial.batch_code)
+
+
+def submit_reference(db, batch, trial, payload, actor):
+    existing = db.scalar(select(ReferenceSubmission).filter_by(trial_id=trial.id, metrologist=actor))
+    if existing is not None:
+        record(db, actor, 'reference.submit.retry',
+               f'交卷重试保留原读数 · {existing.mean_pct:.6f}%', batch.code)
+        return existing, True
+    if batch.state != BatchState.COLLECTING:
+        blocked(db, actor, 'reference.submit', '批次已离开采集状态，不能继续交卷', batch.code)
+    if trial.state == ReferenceTrialState.FINALIZED:
+        blocked(db, actor, 'reference.submit', '盲测已经定案，读数不可追加或修改', batch.code)
+    submissions = trial_submissions(db, trial)
+    if trial.state == ReferenceTrialState.AWAITING_THIRD:
+        slot = 3
+    elif len(submissions) < 2:
+        slot = len(submissions) + 1
+    else:
+        blocked(db, actor, 'reference.submit', '本组盲测已满两份，不能继续交卷', batch.code)
+    if any(item.slot == slot for item in submissions):
+        blocked(db, actor, 'reference.submit', '本组盲测已满员，不能继续交卷', batch.code)
+    provided = [item['specimen'] for item in payload['readings']]
+    if sorted(provided) != sorted(trial.specimens):
+        blocked(db, actor, 'reference.submit', '交卷须覆盖本组全部试片且不能多报', batch.code)
+    submission = ReferenceSubmission(trial_id=trial.id, slot=slot, metrologist=actor,
+                                     mean_pct=submission_mean(payload['readings']))
+    db.add(submission)
+    db.flush()
+    for item in payload['readings']:
+        db.add(ReferenceReading(submission_id=submission.id, specimen=item['specimen'], stage=Stage.PRE,
+                                thickness_mm=item['before_mm']))
+        db.add(ReferenceReading(submission_id=submission.id, specimen=item['specimen'], stage=Stage.POST,
+                                thickness_mm=item['after_mm']))
+    db.flush()
+    record(db, actor, 'reference.submit',
+           f'第 {slot} 份 · {len(trial.specimens)} 枚试片 · {submission.mean_pct:.6f}%', batch.code)
+    submissions = trial_submissions(db, trial)
+    means = [item.mean_pct for item in submissions]
+    if trial.state == ReferenceTrialState.OPEN and len(submissions) == 2:
+        spread = round(max(means) - min(means), 6)
+        if spread > REFERENCE_SPREAD_LIMIT:
+            trial.state = ReferenceTrialState.AWAITING_THIRD
+            trial.spread_pp = spread
+            trial.initial_spread_pp = spread
+            record(db, actor, 'reference.awaiting_third',
+                   f'两份平均相差 {spread:.6f} pp，超过 {REFERENCE_SPREAD_LIMIT:g} pp，请第三人盲测', batch.code)
+        else:
+            finalize_trial(db, trial, means, actor)
+    elif trial.state == ReferenceTrialState.AWAITING_THIRD and len(submissions) == 3:
+        finalize_trial(db, trial, means, actor)
+    return submission, False
+
+
+def trial_readings(db, submission):
+    readings = {}
+    for item in db.scalars(select(ReferenceReading).filter_by(submission_id=submission.id)
+                           .order_by(ReferenceReading.specimen, ReferenceReading.stage)).all():
+        row = readings.setdefault(item.specimen, {'specimen': item.specimen})
+        row['before_mm' if item.stage == Stage.PRE else 'after_mm'] = item.thickness_mm
+    return [readings[specimen] for specimen in sorted(readings)]
+
+
+def trial_view(db, trial, user):
+    submissions = trial_submissions(db, trial)
+    finalized = trial.state == ReferenceTrialState.FINALIZED
+    owner = getattr(user, 'username', None)
+    own = next((item for item in submissions if item.metrologist == owner), None)
+    required = 3 if trial.state == ReferenceTrialState.AWAITING_THIRD or (
+        finalized and trial.rule == ReferenceRule.MEDIAN) else 2
+    can_submit = (getattr(user, 'role', None) == Role.OPERATOR and not finalized
+                  and own is None and trial.certified_pct is None
+                  and len(submissions) < required)
+    entries = []
+    for item in submissions:
+        if not finalized and item.metrologist != owner:
+            entries.append({'slot': item.slot, 'metrologist': item.metrologist,
+                            'submitted_at': iso(item.submitted_at)})
+            continue
+        entries.append({'slot': item.slot, 'metrologist': item.metrologist, 'mean_pct': item.mean_pct,
+                        'readings': trial_readings(db, item), 'submitted_at': iso(item.submitted_at)})
+    base_spread = trial.initial_spread_pp if trial.rule == ReferenceRule.MEDIAN else trial.spread_pp
+    return {
+        'id': trial.id, 'batch_code': trial.batch_code, 'run_id': trial.run_id,
+        'specimens': trial.specimens, 'state': trial.state,
+        'spread_pp': trial.spread_pp if finalized else None,
+        'submitted': len(submissions), 'required': required,
+        'rule': trial.rule, 'final_pct': trial.final_pct,
+        'initial_spread_pp': base_spread if finalized else None,
+        'finalized_at': iso(trial.finalized_at), 'can_submit': can_submit,
+        'own_submission': next((entry for entry in entries if entry['metrologist'] == owner), None),
+        'submissions': entries,
+        'certified_pct': trial.certified_pct, 'certified_by': trial.certified_by,
+        'certified_at': iso(trial.certified_at), 'certification_note': trial.certification_note,
+        'spread_limit_pp': REFERENCE_SPREAD_LIMIT,
+    }
 
 
 def feature_row(batch, recipe, run):
@@ -170,9 +341,43 @@ def observed(pairs):
     return round(sum(100 * (1 - pair[Stage.POST] / pair[Stage.PRE]) for pair in pairs.values()) / len(pairs), 6)
 
 
+REFERENCE_BASIS = {'average': '两份平均定案', 'median': '三份中位定案'}
+
+
+def trial_pairs(db, trial):
+    submissions = trial_submissions(db, trial)
+    if not submissions:
+        return None
+    chosen = next((item for item in submissions if item.mean_pct == trial.final_pct), submissions[0])
+    readings = trial_readings(db, chosen)
+    return {item['specimen']: {Stage.PRE: round(item['before_mm'], 5), Stage.POST: round(item['after_mm'], 5)}
+            for item in readings if 'before_mm' in item and 'after_mm' in item}
+
+
+def reference_pairs(db, batch, run):
+    """Paired evidence for a reference: the certified trial first, routine samples for legacy batches."""
+    trial = reference_trial_for(db, batch.code)
+    if trial is not None and trial.certified_pct is not None:
+        pairs = trial_pairs(db, trial)
+        if pairs:
+            return pairs
+    return paired_measurements(db, run)
+
+
+def reference_observed(db, batch, pairs):
+    """Certified trials contribute their final value; legacy references keep their paired mean."""
+    trial = reference_trial_for(db, batch.code)
+    if trial is not None and trial.certified_pct is not None:
+        return round(trial.certified_pct, 6), REFERENCE_BASIS[trial.rule.value], trial.id
+    return observed(pairs), '历史认证配对均值', None
+
+
 def queue_fit(db, batch, actor):
     if batch.state != BatchState.COLLECTING:
         blocked(db, actor, 'fit.queue', '该批次当前状态不可提交新试算', batch.code)
+    trial = reference_trial_for(db, batch.code)
+    if trial is not None and trial.certified_pct is None:
+        blocked(db, actor, 'fit.queue', '参考盲测尚未定案认证，不能提交试算', batch.code)
     recipe = db.get(RecipeLot, batch.recipe_code)
     try:
         run = training_run(db, batch)
@@ -186,10 +391,15 @@ def queue_fit(db, batch, actor):
     training = []
     for historical in reference:
         archived = latest_run(db, historical.code)
-        pairs = paired_measurements(db, archived)
+        try:
+            pairs = reference_pairs(db, historical, archived)
+        except ValueError as exc:
+            blocked(db, actor, 'fit.queue', f'{historical.code}：{exc}', batch.code)
+        observed_pct, basis, trial_id = reference_observed(db, historical, pairs)
         training.append({
             'batch': historical.code, 'curve_hash': archived.checksum,
-            'features': feature_row(historical, recipe, archived), 'observed': observed(pairs), 'pairs': pairs,
+            'features': feature_row(historical, recipe, archived), 'observed': observed_pct,
+            'basis': basis, 'trial_id': trial_id, 'pairs': pairs,
         })
     feature_columns = zip(*(item['features'] for item in training), strict=True)
     if not any(max(column) - min(column) > 1e-9 for column in feature_columns):

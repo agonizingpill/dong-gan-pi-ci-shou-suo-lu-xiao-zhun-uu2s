@@ -51,6 +51,82 @@ function samplesTable(samples) {
     <td>${number(readings.post?.thickness_mm, 3)}</td><td>${h((readings.post || readings.pre).technician)}</td></tr>`).join('')}</tbody></table>`;
 }
 
+const trialStates = {
+  open: '盲测进行中', awaiting_third: '待第三人盲测', finalized: '已定案',
+};
+const trialRules = {average: '两份平均值', median: '三份中位数'};
+
+function progressMeter(trial) {
+  const filled = trial.submitted;
+  return `<div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="${trial.required}" aria-valuenow="${filled}"
+    aria-label="交卷进度"><div class="progress-track">${Array.from({length: trial.required}, (_, index) =>
+      `<i ${index < filled ? 'data-filled="true"' : ''}></i>`).join('')}</div>
+    <span>${filled} / ${trial.required} 份已交</span></div>`;
+}
+
+function trialReadingsTable(readings) {
+  return `<table class="trial-readings"><thead><tr><th>试片编号</th><th>冻干前 mm</th><th>冻干后 mm</th><th>单枚收缩率</th></tr></thead><tbody>
+    ${readings.map(item => `<tr><th class="mono">${h(item.specimen)}</th><td>${number(item.before_mm, 3)}</td>
+    <td>${number(item.after_mm, 3)}</td><td class="mono">${number(100 * (1 - item.after_mm / item.before_mm))}%</td></tr>`).join('')}</tbody></table>`;
+}
+
+function submissionList(trial) {
+  if (!trial.submissions.length) return '<p class="empty">尚无交卷。两名计量员各自盲测同一组试片。</p>';
+  return `<ol class="submission-list">${trial.submissions.map(entry => `<li>
+    <span class="mono">第 ${entry.slot} 份 · ${h(entry.metrologist)}</span>
+    ${entry.mean_pct == null ? '<span class="sealed">读数封存，定案后可见</span>'
+      : `<b class="mono">${number(entry.mean_pct)}%</b><small>${when(entry.submitted_at)}</small>`}
+    </li>`).join('')}</ol>`;
+}
+
+function trialCard(detail) {
+  const trial = detail.reference_trial;
+  const role = store.user.role;
+  const operator = role === 'operator';
+  const supervisor = role === 'supervisor';
+  const run = detail.runs[0];
+  const canOpen = supervisor && !trial && detail.batch.state === 'collecting' && run?.state === 'frozen';
+  if (!trial && !canOpen) return '';
+  const final = trial?.state === 'finalized';
+  const certified = trial?.certified_pct != null;
+  return `<section class="sheet trial-card">${sectionTitle('参考盲测', trial ? trialStates[trial.state] : '尚未发起')}
+    <div class="padded">
+    ${trial ? `${progressMeter(trial)}
+      <dl class="ledger-meta"><div><dt>盲测试片</dt><dd class="mono">${trial.specimens.map(h).join(' · ')}</dd></div>
+      <div><dt>交卷规则</dt><dd>两人平均相差 ≤ ${number(trial.spread_limit_pp, 1)} pp 取两份平均值，否则第三人盲测取三份中位数</dd></div>
+      ${trial.spread_pp == null ? '' : `<div><dt>交卷极差</dt><dd class="mono">${number(trial.spread_pp, 3)} pp</dd></div>`}
+      ${final && !certified ? `<div><dt>定案值</dt><dd class="mono">${number(trial.final_pct, 6)}% · ${trialRules[trial.rule]}</dd></div>` : ''}
+      ${certified ? `<div><dt>认证取值</dt><dd class="mono">${number(trial.certified_pct, 6)}% · ${trialRules[trial.rule]}</dd></div>
+        <div><dt>认证人</dt><dd>${h(trial.certified_by)} · ${when(trial.certified_at)}</dd></div>
+        <div><dt>认证依据</dt><dd>${h(trial.certification_note)}</dd></div>` : ''}</dl>
+      ${trial.can_submit && operator ? `<form class="trial-form" data-action="submitReference" data-specimens="${h(trial.specimens.join(','))}">
+        <p class="wide sealed-note">盲测期间仅可见本人读数；交卷后重试不会覆盖本人原读数。</p>
+        ${trial.specimens.map(specimen => `<fieldset><legend class="mono">${h(specimen)}</legend>
+          <label>冻干前 mm<input name="before:${h(specimen)}" type="number" step="0.00001" min="0.00001" max="200" required></label>
+          <label>冻干后 mm<input name="after:${h(specimen)}" type="number" step="0.00001" min="0.00001" max="200" required></label></fieldset>`).join('')}
+        <button class="primary wide">交卷盲测读数</button></form>` : ''}
+      ${trial.own_submission?.readings ? `<details class="entry-form trial-reveal"><summary>本人交卷读数 · ${number(trial.own_submission.mean_pct, 6)}%</summary>
+        ${trialReadingsTable(trial.own_submission.readings)}</details>` : ''}
+      ${!trial.can_submit && !final && operator && !trial.own_submission ?
+        `<p class="empty">${trial.submitted >= trial.required ? '本组交卷已满员，等候计规定案。' : '当前账户本组暂不可交卷。'}</p>` : ''}
+      ${!final && trial.submissions.length ? `<h3 class="subhead">交卷进度</h3>${submissionList(trial)}` : ''}
+      ${trial.state === 'awaiting_third' ? '<p class="callout warning">两份平均相差超过 1 个百分点，请第三名计量员盲测同一组试片；三份到齐后取中位数定案。</p>' : ''}
+      ${final ? `<h3 class="subhead">交卷与取值依据</h3>${submissionList(trial)}<div class="trial-basis">${trial.submissions.map(entry =>
+        entry.readings ? `<details class="entry-form"><summary>第 ${entry.slot} 份 · ${h(entry.metrologist)} · ${number(entry.mean_pct, 6)}%</summary>
+        ${trialReadingsTable(entry.readings)}</details>` : '').join('')}
+        <p class="callout">取值依据：${trialRules[trial.rule]}。${trial.rule === 'median'
+          ? `两份平均相差 ${number(trial.initial_spread_pp, 3)} pp，超过 1 pp，第三人盲测后取三份中位数 ${number(trial.final_pct, 6)}%。`
+          : `两份平均相差 ${number(trial.spread_pp, 3)} pp，在 1 pp 限内，取两份平均值 ${number(trial.final_pct, 6)}%。`}</p></div>` : ''}
+      ${supervisor && final && !certified ? `<form data-action="archive"><label class="wide">认证依据（凭定案值 ${number(trial.final_pct, 6)}% 认证）<input name="note" minlength="4" required></label>
+        <button class="primary">凭定案值认证参考批次</button></form>` : ''}
+      ${certified ? '<p class="empty">该批次已凭定案值认证，可进入同配方试算训练。</p>' : ''}
+      ` : `<p class="empty">该批次可作为参考候选。发起盲测后，两名计量员各自读数，系统按差值规则自动定案。</p>
+      <form data-action="openReferenceTrial"><label class="wide">盲测试片编号（逗号分隔，至少两枚）<input name="specimens" placeholder="TRAY-A, TRAY-C" required></label>
+        <label class="wide">发起说明<input name="note" minlength="4" required></label>
+        <button class="primary">发起双人盲测</button></form>`}
+    </div></section>`;
+}
+
 function curveCard(detail, operator) {
   const run = detail.runs[0];
   const collecting = detail.batch.state === 'collecting';
@@ -63,7 +139,7 @@ function curveCard(detail, operator) {
       ${run.checksum ? `<span class="mono">SHA-256 ${h(run.checksum.slice(0, 12))}…</span>` : operator && collecting ? '<button class="primary compact" data-action="freeze">冻结曲线</button>' : ''}</div>
       ${detail.runs.length > 1 ? `<details class="versions"><summary>曲线版本记录（${detail.runs.length}）</summary><ul>${detail.runs.map(item => `<li><span class="mono">${h(item.source_name)}</span>${badge(item.state)} <small>${when(item.frozen_at)}</small></li>`).join('')}</ul></details>` : ''}
       ` : '<p class="empty">先从设备导出 CSV，并在本页导入第一条曲线。</p>'}
-    ${operator && (collecting || detail.calibration?.state === 'held') ? importForm() : ''}
+    ${operator && (collecting || detail.calibration?.state === 'held') && !(detail.reference_trial && detail.reference_trial.certified_pct == null) ? importForm() : ''}
     </section>`;
 }
 
@@ -87,9 +163,10 @@ export function batchesPage() {
       <div><dt>收缩率工艺窗</dt><dd>${windowLabel([detail.recipe.window_low, detail.recipe.window_high])}</dd></div></dl>
       ${detail.readiness_issue ? `<p class="callout warning">${h(detail.readiness_issue)}</p>` : ''}
       ${curveCard(detail, operator)}
+      ${trialCard(detail)}
       <section class="sheet readings">${sectionTitle('试片厚度测量', '按试片编号配对')}${samplesTable(detail.samples)}
-      ${operator && detail.runs[0]?.state === 'frozen' && detail.batch.state === 'collecting' ? sampleForm() : ''}
-      ${supervisor && detail.batch.state === 'collecting' && !detail.readiness_issue ? `<details class="entry-form"><summary>认证为历史标定批次</summary>
-      <form data-action="archive"><label class="wide">认证依据<input name="note" minlength="4" required></label><button class="primary">认证参考批次</button></form></details>` : ''}</section>
+      ${operator && !detail.reference_trial && detail.runs[0]?.state === 'frozen' && detail.batch.state === 'collecting' ? sampleForm() : ''}
+      ${detail.reference_trial && detail.batch.state === 'collecting' ? '<p class="empty">参考盲测进行中，常规读数暂停录入，以免影响盲测隔离。</p>' : ''}
+      </section>
       </div>` : '<p class="empty">登记第一批冻干物料，随后导入曲线。</p>'}</div>`;
 }

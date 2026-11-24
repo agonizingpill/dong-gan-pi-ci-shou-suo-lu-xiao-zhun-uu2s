@@ -9,6 +9,6 @@ export function loginPage() {
         <label>账号<input name="username" autocomplete="username" required></label>
         <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
         <button class="primary">进入计量台</button></form>
-        <p>演示账号</p><div class="quick-accounts"><button data-demo="operator">实验员</button><button data-demo="supervisor">签发主管</button><button data-demo="viewer">只读观察员</button></div></div></div>
+        <p>演示账号</p><div class="quick-accounts"><button data-demo="operator">实验员</button><button data-demo="operator2">计量员二</button><button data-demo="operator3">计量员三</button><button data-demo="supervisor">签发主管</button><button data-demo="viewer">只读观察员</button></div></div></div>
     <footer>北屿果研 · 食品工艺实验室</footer></main>`;
 }

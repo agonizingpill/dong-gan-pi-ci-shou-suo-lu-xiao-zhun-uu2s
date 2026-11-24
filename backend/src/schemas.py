@@ -83,3 +83,30 @@ class RetestIn(Input):
 
 class DecisionIn(Input):
     note: Note
+
+
+class ReferenceTrialIn(Input):
+    specimens: list[Code] = Field(min_length=2, max_length=8)
+    note: Note
+
+    @model_validator(mode='after')
+    def distinct_specimens(self):
+        if len(set(self.specimens)) != len(self.specimens):
+            raise ValueError('试片编号不能重复')
+        return self
+
+
+class ReferenceReadingIn(Input):
+    specimen: Code
+    before_mm: Positive
+    after_mm: Positive
+
+    @model_validator(mode='after')
+    def no_expansion(self):
+        if self.after_mm > self.before_mm:
+            raise ValueError('冻干后厚度应小于或等于冻干前读数')
+        return self
+
+
+class ReferenceSubmitIn(Input):
+    readings: list[ReferenceReadingIn] = Field(min_length=2, max_length=8)

@@ -5,10 +5,14 @@ from sqlalchemy.orm import Session as OrmSession
 
 from src.auth import password_hash
 from src.db import engine
-from src.ledger import checksum, queue_fit
-from src.models import BatchState, ChamberRun, DryBatch, RecipeLot, Role, RunState, ShrinkageSample, Stage, User
+from src.ledger import checksum, queue_fit, submission_mean
+from src.models import (
+    BatchState, ChamberRun, DryBatch, RecipeLot, ReferenceReading, ReferenceSubmission, ReferenceTrial,
+    ReferenceTrialState, Role, RunState, ShrinkageSample, Stage, User,
+)
 
 STAMP = datetime(2026, 11, 21, 0, 0)
+METROLOGISTS = ('operator', 'operator2', 'operator3')
 
 
 def points(minutes, pressure, temp, *, vacuum=True):
@@ -25,6 +29,9 @@ def seed(db):
     for role in Role:
         if db.get(User, role.value) is None:
             db.add(User(username=role.value, password_hash=password_hash('Lab-demo-1062'), role=role))
+    for metrologist in METROLOGISTS[1:]:
+        if db.get(User, metrologist) is None:
+            db.add(User(username=metrologist, password_hash=password_hash('Lab-demo-1062'), role=Role.OPERATOR))
     for values in [
         ('AP-26R3', '青苹果薄片 · AP03', 14.2, 8.0, 9.0, 16.0),
         ('PE-26R1', '香梨薄片 · PE01', 12.8, 7.0, 7.0, 14.0),
@@ -68,7 +75,39 @@ def seed(db):
         db.flush()
         if code in ('FD-1121A', 'FD-1121C'):
             queue_fit(db, batch, 'operator')
+    seed_reference_trial(db)
     return len(db.scalars(select(DryBatch.code)).all())
+
+
+def seed_reference_trial(db):
+    """A second candidate reference batch with one retained blind submission."""
+    code = 'FD-1125R'
+    if db.get(DryBatch, code) is not None:
+        return
+    batch = DryBatch(code=code, recipe_code='AP-26R3', dryer='FDX-02', material_lot='APL-1125R',
+                     feed_mm=8.0, state=BatchState.COLLECTING)
+    db.add(batch)
+    db.flush()
+    readings = points(258, 34, -21)
+    run = ChamberRun(batch_code=code, source_name=f'{code}_chamber_r1.csv', state=RunState.FROZEN,
+                     points=readings, checksum=checksum(readings), frozen_at=STAMP)
+    db.add(run)
+    db.flush()
+    trial = ReferenceTrial(batch_code=code, run_id=run.id, specimens=['TRAY-A', 'TRAY-C'],
+                           state=ReferenceTrialState.OPEN, created_by='supervisor', created_at=STAMP)
+    db.add(trial)
+    db.flush()
+    blinded = [{'specimen': 'TRAY-A', 'before_mm': 8.0, 'after_mm': 6.994},
+               {'specimen': 'TRAY-C', 'before_mm': 8.0, 'after_mm': 6.931}]
+    submission = ReferenceSubmission(trial_id=trial.id, slot=1, metrologist='operator',
+                                     mean_pct=submission_mean(blinded), submitted_at=STAMP)
+    db.add(submission)
+    db.flush()
+    for item in blinded:
+        for stage, reading in [(Stage.PRE, item['before_mm']), (Stage.POST, item['after_mm'])]:
+            db.add(ReferenceReading(submission_id=submission.id, specimen=item['specimen'],
+                                    stage=stage, thickness_mm=reading))
+    db.flush()
 
 
 def main():

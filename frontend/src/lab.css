@@ -133,6 +133,23 @@ form button { justify-self: start; }
 .history li b { font-size: .83rem; }
 .history time { float: right; font: 500 .7rem var(--mono); color: var(--muted); }
 .history li p { color: var(--muted); font-size: .77rem; margin-top: 2px; overflow-wrap: anywhere; }
+.trial-card { margin-top: 15px; }
+.trial-card .subhead { font-size: .9rem; margin: 16px 0 4px; }
+.progress { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; color: var(--muted); font-size: .82rem; }
+.progress-track { display: flex; gap: 4px; }
+.progress-track i { width: 34px; height: 9px; background: var(--ground); border: 1px solid var(--line); }
+.progress-track i[data-filled] { background: var(--teal); border-color: var(--teal); }
+.submission-list { list-style: none; margin: 0 0 12px; padding: 0; }
+.submission-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: .86rem; }
+.submission-list li small { color: var(--muted); font-size: .74rem; }
+.submission-list .sealed { color: var(--muted); font-size: .78rem; }
+.trial-form fieldset { border: 1px solid var(--line); padding: 8px 10px 10px; margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.trial-form legend { font-size: .78rem; color: var(--muted); padding-inline: 4px; }
+.trial-form fieldset label { font-size: .78rem; }
+.trial-form .sealed-note { color: var(--muted); font-size: .8rem; margin: 0; }
+.trial-reveal { padding-inline: 0; }
+.trial-readings th, .trial-readings td { padding: 6px 9px; }
+@media (max-width: 767px) { .trial-form fieldset { grid-template-columns: 1fr; } }
 .toast { position: fixed; z-index: 2; right: 25px; bottom: 25px; background: var(--nav); color: var(--paper); padding: 13px 19px; max-width: min(450px, 90vw); border-left: 4px solid oklch(78% .08 178); animation: surface-in 300ms var(--settle); }
 .toast[data-error="true"] { border-color: oklch(77% .15 75); }
 .login-wrap { min-height: 100vh; max-width: 1120px; margin: auto; padding: 52px 32px 35px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 24px; }

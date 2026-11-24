@@ -27,6 +27,7 @@ async function request(path, method = 'GET', data) {
 const batchPath = code => `/batches/${encodeURIComponent(code)}`;
 const fitPath = id => `/calibrations/${encodeURIComponent(id)}`;
 const curvePath = (code, id) => `${batchPath(code)}/curves/${id}`;
+const trialPath = code => `${batchPath(code)}/reference-trial`;
 export const api = {
   login: payload => request('/session', 'POST', payload), session: () => request('/session'),
   batches: () => request('/batches'), recipes: () => request('/recipes'),
@@ -38,6 +39,8 @@ export const api = {
   freeze: (code, id) => request(`${curvePath(code, id)}/freeze`, 'POST'),
   sample: (code, id, data) => request(`${curvePath(code, id)}/samples`, 'POST', data),
   archive: (code, data) => request(`${batchPath(code)}/archive`, 'POST', data),
+  openTrial: (code, data) => request(trialPath(code), 'POST', data),
+  submitTrial: (code, data) => request(`${trialPath(code)}/submissions`, 'POST', data),
   fit: code => request(`${batchPath(code)}/calibration`, 'POST'),
   retry: id => request(`${fitPath(id)}/retry`, 'POST'),
   retest: (id, data) => request(`${fitPath(id)}/retest`, 'POST', data),
